@@ -9,42 +9,61 @@ use crate::utxo::{UtxoEntry, UtxoView};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ValidationError {
-    #[error("transaction has no outputs")]
-    NoOutputs,
-    #[error("non-coinbase transaction has no inputs")]
-    NoInputs,
+    #[error("transaction has no inputs, outputs, or shielded bundle")]
+    EmptyTransaction,
     #[error("input references an unknown or already-spent output")]
     MissingUtxo,
     #[error("input's public key does not match the locked pubkey hash")]
     PubkeyMismatch,
     #[error("input signature does not verify")]
     BadSignature,
-    #[error("transaction outputs exceed transaction inputs")]
+    #[error("transaction outputs (transparent and/or shielded) exceed its inputs")]
     OutputsExceedInputs,
     #[error("duplicate input within the same transaction")]
     DuplicateInput,
-    #[error("coinbase transaction must have exactly one input-less mint output set")]
+    #[error("coinbase transaction must have exactly one input-less, unshielded mint output set")]
     InvalidCoinbaseShape,
     #[error("coinbase mints more than the block reward plus collected fees")]
     CoinbaseExceedsAllowance,
+    #[error("shielded bundle failed verification: {0}")]
+    ShieldedBundleInvalid(String),
+    #[error("shielded bundle's anchor is not a known recent note commitment tree root")]
+    UnknownShieldedAnchor,
+    #[error("shielded bundle reuses a nullifier that has already been spent")]
+    ShieldedNullifierReused,
 }
 
-/// Validates a non-coinbase transaction against the current UTXO set:
-/// every input must reference an existing, unspent output; the spender must
-/// prove ownership of it (pubkey hashes to the locked hash, and the
-/// signature verifies over the transaction's signing data); and outputs
-/// must not exceed inputs. Returns the fee (inputs - outputs) in quarks.
+/// Read-only access to the shielded pool's consensus state — recent note
+/// commitment tree anchors and spent nullifiers — needed to validate a
+/// transaction's shielded bundle. Implemented by `aeon_storage::Store`;
+/// kept as a trait so this crate stays storage-agnostic, the same way
+/// [`UtxoView`] does for the transparent ledger.
+pub trait ShieldedPoolView {
+    fn shielded_nullifier_seen(&self, nullifier: &[u8; 32]) -> bool;
+    fn is_recent_shielded_anchor(&self, anchor: &[u8; 32]) -> bool;
+}
+
+/// Validates a transaction's transparent side against the current UTXO set
+/// (every input references an existing, unspent output; the spender proves
+/// ownership; a valid signature covers the transaction), and folds in its
+/// shielded bundle's public `value_balance` if it has one. Returns the fee
+/// (transparent inputs, plus value leaving the shielded pool, minus
+/// transparent outputs and value entering the shielded pool) in quarks.
+///
+/// Does **not** verify the shielded bundle's zk-SNARK proof/signatures or
+/// check nullifier-reuse/anchor validity — see [`verify_shielded_component`]
+/// and [`verify_transaction_full`], which combine both. This split exists
+/// because the transparent checks only need a [`UtxoView`], while the
+/// shielded checks need chain-wide [`ShieldedPoolView`] state; most callers
+/// want [`verify_transaction_full`].
 ///
 /// Does not mutate `utxo`; the caller applies the transaction afterwards via
 /// [`crate::utxo::UtxoSet::apply_transaction`] (or, for a whole block, via
 /// [`verify_block_transactions`], which also catches double-spends
 /// *within* a block by validating against a running overlay).
 pub fn verify_transaction(tx: &Transaction, utxo: &impl UtxoView) -> Result<u64, ValidationError> {
-    if tx.outputs.is_empty() {
-        return Err(ValidationError::NoOutputs);
-    }
-    if tx.inputs.is_empty() {
-        return Err(ValidationError::NoInputs);
+    if tx.inputs.is_empty() && tx.outputs.is_empty() && tx.shielded.is_none() {
+        return Err(ValidationError::EmptyTransaction);
     }
 
     let signing_data = tx.signing_data();
@@ -73,22 +92,76 @@ pub fn verify_transaction(tx: &Transaction, utxo: &impl UtxoView) -> Result<u64,
     }
 
     let total_out = tx.total_output_amount() as u128;
-    if total_out > total_in {
+    // Positive value_balance means value is *leaving* the shielded pool
+    // (funding transparent outputs); negative means value is *entering* it
+    // (drawn from transparent inputs) — see docs/CONSENSUS.md.
+    let shielded_value_balance: i128 = tx
+        .shielded
+        .as_ref()
+        .map(|b| b.value_balance() as i128)
+        .unwrap_or(0);
+
+    let net = total_in as i128 - total_out as i128 + shielded_value_balance;
+    if net < 0 {
         return Err(ValidationError::OutputsExceedInputs);
     }
-
-    Ok((total_in - total_out) as u64)
+    Ok(net as u64)
 }
 
-/// Validates a block's coinbase transaction: it must have no inputs, and
-/// must not mint more than the height's block subsidy plus the fees
-/// collected from the block's other transactions.
+/// Verifies a transaction's shielded bundle, if it has one: the zk-SNARK
+/// proof and signatures ([`aeon_shielded::ShieldedBundle::verify`]), that
+/// its anchor is a recent, known note commitment tree root, and that none
+/// of its nullifiers have already been spent — either on-chain
+/// (`pool`) or earlier in the same block (`nullifiers_seen_in_block`, which
+/// this function updates). A no-op for a purely transparent transaction.
+pub fn verify_shielded_component(
+    tx: &Transaction,
+    pool: &impl ShieldedPoolView,
+    nullifiers_seen_in_block: &mut HashSet<[u8; 32]>,
+) -> Result<(), ValidationError> {
+    let Some(bundle) = &tx.shielded else {
+        return Ok(());
+    };
+
+    bundle
+        .verify()
+        .map_err(|e| ValidationError::ShieldedBundleInvalid(e.to_string()))?;
+
+    if !pool.is_recent_shielded_anchor(&bundle.anchor_bytes()) {
+        return Err(ValidationError::UnknownShieldedAnchor);
+    }
+
+    for nullifier in bundle.nullifier_bytes() {
+        if pool.shielded_nullifier_seen(&nullifier) || !nullifiers_seen_in_block.insert(nullifier) {
+            return Err(ValidationError::ShieldedNullifierReused);
+        }
+    }
+
+    Ok(())
+}
+
+/// [`verify_transaction`] and [`verify_shielded_component`] combined — what
+/// most callers (mempool acceptance, block validation) actually want.
+pub fn verify_transaction_full(
+    tx: &Transaction,
+    utxo: &impl UtxoView,
+    pool: &impl ShieldedPoolView,
+    nullifiers_seen_in_block: &mut HashSet<[u8; 32]>,
+) -> Result<u64, ValidationError> {
+    verify_shielded_component(tx, pool, nullifiers_seen_in_block)?;
+    verify_transaction(tx, utxo)
+}
+
+/// Validates a block's coinbase transaction: it must have no inputs and no
+/// shielded bundle (mining rewards always start out transparent — see
+/// `docs/PRIVACY.md`), and must not mint more than the height's block
+/// subsidy plus the fees collected from the block's other transactions.
 pub fn verify_coinbase(
     tx: &Transaction,
     chain_height: u64,
     total_fees: u64,
 ) -> Result<(), ValidationError> {
-    if !tx.is_coinbase() || tx.outputs.is_empty() {
+    if !tx.is_coinbase() || tx.outputs.is_empty() || tx.shielded.is_some() {
         return Err(ValidationError::InvalidCoinbaseShape);
     }
     let allowance = block_reward(chain_height).saturating_add(total_fees);
@@ -124,12 +197,14 @@ impl<'a, V: UtxoView> UtxoView for BlockOverlay<'a, V> {
 
 /// Validates every transaction in a block (in order) against `base_utxo`,
 /// a coinbase-aware overlay that also catches double-spends within the
-/// block itself, and finally validates the coinbase against the collected
-/// fees. Returns the total fees on success.
+/// block itself (both transparent, via the UTXO overlay, and shielded, via
+/// a per-block nullifier set), and finally validates the coinbase against
+/// the collected fees. Returns the total fees on success.
 pub fn verify_block_transactions(
     transactions: &[Transaction],
     chain_height: u64,
     base_utxo: &impl UtxoView,
+    shielded_pool: &impl ShieldedPoolView,
 ) -> Result<u64, ValidationError> {
     if transactions.is_empty() {
         return Err(ValidationError::InvalidCoinbaseShape);
@@ -140,10 +215,12 @@ pub fn verify_block_transactions(
         spent: HashSet::new(),
         created: HashMap::new(),
     };
+    let mut nullifiers_seen_in_block = HashSet::new();
     let mut total_fees: u64 = 0;
 
     for tx in &transactions[1..] {
-        let fee = verify_transaction(tx, &overlay)?;
+        let fee =
+            verify_transaction_full(tx, &overlay, shielded_pool, &mut nullifiers_seen_in_block)?;
         total_fees = total_fees
             .checked_add(fee)
             .ok_or(ValidationError::CoinbaseExceedsAllowance)?;
@@ -187,6 +264,20 @@ pub fn expected_pubkey_hash(pubkey: &PublicKey) -> [u8; 20] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A [`ShieldedPoolView`] for tests that never exercise the shielded
+    /// pool: since [`verify_shielded_component`] never even calls into
+    /// `pool` for a transaction with `shielded: None`, its answers here are
+    /// never observed.
+    struct NoShieldedActivity;
+    impl ShieldedPoolView for NoShieldedActivity {
+        fn shielded_nullifier_seen(&self, _nullifier: &[u8; 32]) -> bool {
+            false
+        }
+        fn is_recent_shielded_anchor(&self, _anchor: &[u8; 32]) -> bool {
+            false
+        }
+    }
     use crate::types::{OutPoint, TxInput, TxOutput};
     use crate::utxo::UtxoSet;
     use aeon_crypto::{Hash, KeyPair};
@@ -237,6 +328,7 @@ mod tests {
                 outs
             },
             lock_time: 0,
+            shielded: None,
         };
         let sig = sign_input(&tx, owner);
         tx.inputs[0].signature = sig;
@@ -305,6 +397,7 @@ mod tests {
                 pubkey_hash: miner.public_key().pubkey_hash(),
             }],
             lock_time: 0,
+            shielded: None,
         };
         assert_eq!(
             verify_coinbase(&coinbase, 0, 50),
@@ -336,9 +429,11 @@ mod tests {
                 pubkey_hash: alice.public_key().pubkey_hash(),
             }],
             lock_time: 0,
+            shielded: None,
         };
 
-        let fees = verify_block_transactions(&[coinbase, tx1, tx2], 0, &utxo).unwrap();
+        let fees = verify_block_transactions(&[coinbase, tx1, tx2], 0, &utxo, &NoShieldedActivity)
+            .unwrap();
         assert_eq!(fees, 100);
     }
 
@@ -358,10 +453,11 @@ mod tests {
                 pubkey_hash: alice.public_key().pubkey_hash(),
             }],
             lock_time: 0,
+            shielded: None,
         };
 
         assert_eq!(
-            verify_block_transactions(&[coinbase, tx1, tx2], 0, &utxo),
+            verify_block_transactions(&[coinbase, tx1, tx2], 0, &utxo, &NoShieldedActivity),
             Err(ValidationError::MissingUtxo)
         );
     }

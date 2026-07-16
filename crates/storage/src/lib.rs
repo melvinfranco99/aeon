@@ -23,8 +23,16 @@ use aeon_core::{
     GhostdagParams, GhostdagStore, OutPoint, UtxoEntry,
 };
 use aeon_crypto::Hash;
+use aeon_shielded::CommitmentFrontier;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// How many of the most recent per-block anchors (note commitment tree
+/// roots) a shielded spend's proof may be built against. Tolerates a
+/// prover being a little behind the chain tip without holding an unbounded
+/// history; Aeon's own choice (documented in `docs/PRIVACY.md`), analogous
+/// to Zcash's own anchor-recency allowance.
+const RECENT_ANCHOR_WINDOW: usize = 100;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -52,6 +60,16 @@ struct UndoRecord {
     /// UTXOs created by this block's transactions, to be deleted if the
     /// block is later undone by a reorg.
     added: Vec<OutPoint>,
+    /// Nullifiers this block's shielded bundles added to the seen-set, to
+    /// be removed if the block is later undone.
+    shielded_nullifiers_added: Vec<[u8; 32]>,
+    /// The note commitment frontier's serialized state *before* this block
+    /// was applied, restored verbatim on undo (cheaper and much simpler
+    /// than incrementally rewinding the tree).
+    shielded_frontier_before: Vec<u8>,
+    /// The recent-anchor history's state *before* this block, restored
+    /// verbatim on undo for the same reason.
+    shielded_anchor_history_before: Vec<u8>,
 }
 
 pub struct Store {
@@ -65,6 +83,14 @@ pub struct Store {
     /// *all* of these as parents — that's what makes Aeon a BlockDAG
     /// rather than a hidden single chain.
     tips: sled::Tree,
+    /// Nullifiers of every spent shielded note ever confirmed on the
+    /// selected chain (see `docs/PRIVACY.md`), keyed by the 32-byte
+    /// nullifier with an empty value — Aeon's shielded-pool analogue of
+    /// double-spend prevention.
+    shielded_nullifiers: sled::Tree,
+    /// Small metadata tree holding the current note commitment frontier
+    /// (key `"frontier"`) and the recent-anchor history (key `"anchors"`).
+    shielded_meta: sled::Tree,
 }
 
 const META_TIP_KEY: &[u8] = b"tip";
@@ -80,6 +106,8 @@ impl Store {
             utxo: db.open_tree("utxo")?,
             meta: db.open_tree("meta")?,
             tips: db.open_tree("tips")?,
+            shielded_nullifiers: db.open_tree("shielded_nullifiers")?,
+            shielded_meta: db.open_tree("shielded_meta")?,
         })
     }
 
@@ -93,7 +121,47 @@ impl Store {
             utxo: db.open_tree("utxo")?,
             meta: db.open_tree("meta")?,
             tips: db.open_tree("tips")?,
+            shielded_nullifiers: db.open_tree("shielded_nullifiers")?,
+            shielded_meta: db.open_tree("shielded_meta")?,
         })
+    }
+
+    // ---- shielded pool -------------------------------------------------
+
+    pub fn shielded_nullifier_seen(&self, nullifier: &[u8; 32]) -> bool {
+        self.shielded_nullifiers
+            .contains_key(nullifier)
+            .unwrap_or(false)
+    }
+
+    fn current_frontier(&self) -> CommitmentFrontier {
+        match self.shielded_meta.get(b"frontier").ok().flatten() {
+            Some(bytes) => {
+                CommitmentFrontier::from_bytes(&bytes).expect("stored frontier is well-formed")
+            }
+            None => CommitmentFrontier::empty(),
+        }
+    }
+
+    fn recent_anchor_history(&self) -> Vec<[u8; 32]> {
+        match self.shielded_meta.get(b"anchors").ok().flatten() {
+            Some(bytes) => bincode::deserialize(&bytes).unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The current note commitment tree anchor — what a freshly-built
+    /// shielded spend should prove against.
+    pub fn shielded_anchor(&self) -> [u8; 32] {
+        self.current_frontier().root_bytes()
+    }
+
+    /// Whether `anchor` is the current anchor or one of the last
+    /// [`RECENT_ANCHOR_WINDOW`] anchors, i.e. recent enough for a shielded
+    /// spend to be built against without the prover needing to be
+    /// perfectly caught up to the chain tip.
+    pub fn is_recent_shielded_anchor(&self, anchor: &[u8; 32]) -> bool {
+        self.recent_anchor_history().iter().any(|a| a == anchor)
     }
 
     /// All current DAG tips (blocks with no known children yet).
@@ -191,6 +259,32 @@ impl Store {
         }
         window.reverse();
         window
+    }
+
+    /// Every block on the selected parent chain with height (blue score)
+    /// strictly greater than `since_height`, oldest first — what a wallet's
+    /// `/shielded-actions` scan walks to discover its own notes and rebuild
+    /// its local commitment tree (see `aeon_shielded::witness_for_position`).
+    pub fn selected_chain_blocks_since(&self, since_height: u64) -> Vec<(u64, Block)> {
+        let mut collected = Vec::new();
+        let Some(mut current) = self.tip() else {
+            return collected;
+        };
+        while let Some(data) = self.get_ghostdag(&current) {
+            if data.blue_score <= since_height {
+                break;
+            }
+            let Some(block) = self.get_block(&current) else {
+                break;
+            };
+            collected.push((data.blue_score, block));
+            match data.selected_parent {
+                Some(sp) => current = sp,
+                None => break,
+            }
+        }
+        collected.reverse();
+        collected
     }
 
     /// The difficulty ("bits") the next block extending `tip` should use.
@@ -361,6 +455,17 @@ impl Store {
     fn apply_block_to_ledger(&self, block: &Block) -> UndoRecord {
         let mut removed = Vec::new();
         let mut added = Vec::new();
+
+        let frontier_before = self.current_frontier();
+        let anchor_history_before = self.recent_anchor_history();
+        let shielded_frontier_before = frontier_before.to_bytes();
+        let shielded_anchor_history_before =
+            bincode::serialize(&anchor_history_before).expect("anchor history serializes");
+
+        let mut frontier = frontier_before;
+        let mut anchor_history = anchor_history_before;
+        let mut shielded_nullifiers_added = Vec::new();
+
         for (i, tx) in block.transactions.iter().enumerate() {
             let is_coinbase = i == 0;
             if !is_coinbase {
@@ -386,8 +491,48 @@ impl Store {
                 );
                 added.push(outpoint);
             }
+
+            if let Some(bundle) = &tx.shielded {
+                for nf in bundle.nullifier_bytes() {
+                    self.shielded_nullifiers
+                        .insert(nf, &[])
+                        .expect("sled insert");
+                    shielded_nullifiers_added.push(nf);
+                }
+                for cmx in bundle.note_commitment_bytes() {
+                    frontier
+                        .append(cmx)
+                        .expect("a proven bundle's own commitments are always valid");
+                }
+            }
         }
-        UndoRecord { removed, added }
+
+        // One anchor entry per block (even with no shielded activity, so
+        // the window covers "the last N blocks", not "the last N blocks
+        // that happened to contain shielded activity").
+        anchor_history.push(frontier.root_bytes());
+        if anchor_history.len() > RECENT_ANCHOR_WINDOW {
+            let excess = anchor_history.len() - RECENT_ANCHOR_WINDOW;
+            anchor_history.drain(0..excess);
+        }
+
+        self.shielded_meta
+            .insert(b"frontier", frontier.to_bytes())
+            .expect("sled insert");
+        self.shielded_meta
+            .insert(
+                b"anchors",
+                bincode::serialize(&anchor_history).expect("anchor history serializes"),
+            )
+            .expect("sled insert");
+
+        UndoRecord {
+            removed,
+            added,
+            shielded_nullifiers_added,
+            shielded_frontier_before,
+            shielded_anchor_history_before,
+        }
     }
 
     fn undo_block_from_ledger(&self, undo: &UndoRecord) -> Result<(), StoreError> {
@@ -397,6 +542,13 @@ impl Store {
         for (outpoint, entry) in &undo.removed {
             self.put_utxo(outpoint, entry);
         }
+        for nf in &undo.shielded_nullifiers_added {
+            self.shielded_nullifiers.remove(nf)?;
+        }
+        self.shielded_meta
+            .insert(b"frontier", undo.shielded_frontier_before.clone())?;
+        self.shielded_meta
+            .insert(b"anchors", undo.shielded_anchor_history_before.clone())?;
         Ok(())
     }
 
@@ -442,6 +594,15 @@ impl Store {
 impl aeon_core::UtxoView for Store {
     fn get_utxo(&self, outpoint: &OutPoint) -> Option<UtxoEntry> {
         Store::get_utxo(self, outpoint)
+    }
+}
+
+impl aeon_core::ShieldedPoolView for Store {
+    fn shielded_nullifier_seen(&self, nullifier: &[u8; 32]) -> bool {
+        Store::shielded_nullifier_seen(self, nullifier)
+    }
+    fn is_recent_shielded_anchor(&self, anchor: &[u8; 32]) -> bool {
+        Store::is_recent_shielded_anchor(self, anchor)
     }
 }
 
@@ -509,6 +670,7 @@ mod tests {
             // amount to the same address at different heights don't
             // collide on txid (see the doc comment on `Transaction`).
             lock_time: height,
+            shielded: None,
         }
     }
 
@@ -605,6 +767,61 @@ mod tests {
         assert_eq!(
             store.balance_for_pubkey_hash(&bob.public_key().pubkey_hash()),
             600
+        );
+    }
+
+    /// Builds a real, proven shielding bundle (see `aeon-shielded`). Slow
+    /// (real zk-SNARK proving), by nature of what's being tested.
+    fn dummy_shielding_bundle(value_quarks: u64) -> aeon_shielded::ShieldedBundle {
+        let mnemonic = aeon_crypto::generate_mnemonic();
+        let sk = aeon_shielded::derive_spending_key(&mnemonic, "");
+        let address = aeon_shielded::default_address(&sk);
+        aeon_shielded::build_shielding_bundle(address, value_quarks)
+            .expect("shielding bundle should build")
+    }
+
+    #[test]
+    fn shielded_pool_advances_anchor_and_undoes_it_on_reorg() {
+        let store = Store::open_temporary().unwrap();
+        let params = GhostdagParams::default();
+
+        let genesis = make_block(vec![], vec![], 0);
+        let genesis_hash = genesis.hash();
+        store.insert_genesis(genesis).unwrap();
+        let empty_anchor = store.shielded_anchor();
+
+        let shielding_tx = Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            lock_time: 0,
+            shielded: Some(dummy_shielding_bundle(5000)),
+        };
+        let branch_a = make_block(vec![genesis_hash], vec![shielding_tx], 1);
+        store.insert_block(branch_a, &params).unwrap();
+
+        let anchor_after_shielding = store.shielded_anchor();
+        assert_ne!(
+            anchor_after_shielding, empty_anchor,
+            "the anchor should change once a note commitment is added"
+        );
+        assert!(store.is_recent_shielded_anchor(&anchor_after_shielding));
+        assert!(
+            store.is_recent_shielded_anchor(&empty_anchor),
+            "genesis's own anchor is still recent"
+        );
+
+        // A heavier competing branch with no shielded activity overtakes
+        // branch A, so its shielded effects should be undone.
+        let branch_b1 = make_block(vec![genesis_hash], vec![], 2);
+        let branch_b1_hash = branch_b1.hash();
+        store.insert_block(branch_b1, &params).unwrap();
+        let branch_b2 = make_block(vec![branch_b1_hash], vec![], 3);
+        store.insert_block(branch_b2, &params).unwrap();
+
+        assert_eq!(
+            store.shielded_anchor(),
+            empty_anchor,
+            "undoing branch A's shielded block should restore the pre-shielding anchor"
         );
     }
 }

@@ -1,4 +1,5 @@
 use aeon_crypto::{blake3_hash, merkle_root, Hash, PublicKey, SchnorrSignature};
+use aeon_shielded::ShieldedBundle;
 use serde::{Deserialize, Serialize};
 
 /// A reference to a specific output of a previous transaction.
@@ -27,7 +28,9 @@ pub struct TxOutput {
 }
 
 /// An Aeon transaction. Coinbase transactions (which mint new coins) have
-/// no inputs.
+/// no inputs and never carry a `shielded` bundle — mining rewards always
+/// start out transparent, matching Zcash's own original design (see
+/// `docs/PRIVACY.md`).
 ///
 /// Coinbase transactions **must** set `lock_time` to the block's chain
 /// height (`GhostdagData::blue_score`), analogous to Bitcoin's BIP34: since
@@ -35,11 +38,19 @@ pub struct TxOutput {
 /// reward to the same address would otherwise produce byte-identical
 /// coinbase transactions and thus colliding txids, silently overwriting one
 /// block's reward with the other's in the UTXO set.
+///
+/// `shielded` is Aeon's optional private pool (see `docs/PRIVACY.md`): a
+/// transaction may be purely transparent (`shielded: None`, unchanged
+/// behavior), purely shielded (empty `inputs`/`outputs`, a private
+/// shielded-to-shielded transfer), or mixed (shielding funds in, or
+/// deshielding them back out — see `aeon_core::validation::verify_balance`
+/// for how the transparent and shielded sides are reconciled).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transaction {
     pub inputs: Vec<TxInput>,
     pub outputs: Vec<TxOutput>,
     pub lock_time: u64,
+    pub shielded: Option<ShieldedBundle>,
 }
 
 impl Transaction {
@@ -48,10 +59,15 @@ impl Transaction {
     }
 
     /// The data that both the transaction id and each input's signature are
-    /// computed over: input outpoints and output contents, but *not* the
-    /// unlocking signatures/pubkeys themselves. This makes the txid stable
+    /// computed over: input outpoints and output contents (but *not* the
+    /// unlocking signatures/pubkeys themselves — this makes the txid stable
     /// under re-signing and immune to signature malleability, the same way
-    /// SegWit excludes witness data from Bitcoin's txid.
+    /// SegWit excludes witness data from Bitcoin's txid), plus a commitment
+    /// to the shielded bundle when present. Binding the shielded bundle in
+    /// here means a mixed transaction's transparent signature also commits
+    /// to its shielded half: nobody can swap or strip the shielded bundle
+    /// of an already-signed mixed transaction without invalidating the
+    /// transparent signature too.
     pub fn signing_data(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         for input in &self.inputs {
@@ -63,6 +79,12 @@ impl Transaction {
             buf.extend_from_slice(&output.pubkey_hash);
         }
         buf.extend_from_slice(&self.lock_time.to_le_bytes());
+        if let Some(bundle) = &self.shielded {
+            let commitment = bundle
+                .tx_commitment_bytes()
+                .expect("a bundle built for Aeon's fixed bundle/TX version always commits");
+            buf.extend_from_slice(&commitment);
+        }
         buf
     }
 
@@ -147,6 +169,7 @@ mod tests {
             inputs: vec![base_input.clone()],
             outputs: vec![out.clone()],
             lock_time: 0,
+            shielded: None,
         };
         let mut tx_b = tx_a.clone();
         tx_b.inputs[0].pubkey = kp2.public_key();

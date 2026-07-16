@@ -23,5 +23,6 @@ pub use types::{Block, BlockHeader, OutPoint, Transaction, TxInput, TxOutput};
 pub use utxo::{UtxoEntry, UtxoSet, UtxoView};
 pub use validation::{
     expected_pubkey_hash, sign_input, verify_block_transactions, verify_coinbase,
-    verify_transaction, ValidationError,
+    verify_shielded_component, verify_transaction, verify_transaction_full, ShieldedPoolView,
+    ValidationError,
 };

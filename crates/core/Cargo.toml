@@ -8,6 +8,8 @@ description = "Aeon consensus: GHOSTDAG BlockDAG engine, UTXO ledger, emission s
 
 [dependencies]
 aeon-crypto.workspace = true
+aeon-shielded.workspace = true
+orchard.workspace = true
 serde.workspace = true
 bincode.workspace = true
 thiserror.workspace = true

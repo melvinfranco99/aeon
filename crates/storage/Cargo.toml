@@ -9,6 +9,7 @@ description = "Persistent (sled-backed) storage for Aeon: blocks, GHOSTDAG metad
 [dependencies]
 aeon-core.workspace = true
 aeon-crypto.workspace = true
+aeon-shielded.workspace = true
 sled.workspace = true
 serde.workspace = true
 bincode.workspace = true
