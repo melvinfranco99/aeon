@@ -1,0 +1,18 @@
+[package]
+name = "aeon-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Persistent (sled-backed) storage for Aeon: blocks, GHOSTDAG metadata, UTXO ledger"
+
+[dependencies]
+aeon-core.workspace = true
+aeon-crypto.workspace = true
+sled.workspace = true
+serde.workspace = true
+bincode.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
