@@ -9,6 +9,7 @@ members = [
     "crates/node",
     "crates/miner",
     "crates/wallet",
+    "crates/shielded",
 ]
 
 [workspace.package]
@@ -25,6 +26,8 @@ aeon-crypto = { path = "crates/crypto" }
 aeon-storage = { path = "crates/storage" }
 aeon-network = { path = "crates/network" }
 aeon-rpc = { path = "crates/rpc" }
+aeon-shielded = { path = "crates/shielded" }
+orchard = { version = "0.15", features = ["circuit"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

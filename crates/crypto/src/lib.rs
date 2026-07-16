@@ -12,4 +12,6 @@ pub use address::{Address, AddressError};
 pub use hash::{blake3_hash, merkle_root, Hash};
 pub use keys::{CryptoError, KeyPair, PublicKey, SchnorrSignature};
 pub use keystore::{Keystore, KeystoreError};
-pub use mnemonic::{generate_mnemonic, parse_mnemonic, seed_to_key_material, MnemonicError};
+pub use mnemonic::{
+    generate_mnemonic, parse_mnemonic, seed64_to_key_material, seed_to_key_material, MnemonicError,
+};
