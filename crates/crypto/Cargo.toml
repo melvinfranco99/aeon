@@ -1,0 +1,23 @@
+[package]
+name = "aeon-crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Cryptographic primitives for Aeon: hashing, Schnorr keys/signatures, addresses"
+
+[dependencies]
+blake3.workspace = true
+k256.workspace = true
+signature = "2"
+rand_core.workspace = true
+serde.workspace = true
+bech32.workspace = true
+bip39.workspace = true
+aes-gcm.workspace = true
+scrypt.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

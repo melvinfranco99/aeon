@@ -1,0 +1,19 @@
+/target/
+**/target/
+Cargo.lock.bak
+
+# Node data directories created by running aeon-node locally
+/aeon-data/
+/node-a-data/
+/node-b-data/
+*.sled/
+
+# Wallet files contain (encrypted) private key material; never commit one.
+*wallet*.json
+!crates/wallet/**
+
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
