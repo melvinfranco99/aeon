@@ -1,0 +1,35 @@
+[package]
+name = "aeon-node"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "The Aeon full node daemon: GHOSTDAG consensus, P2P gossip, and a JSON-RPC API for wallets and miners"
+
+[lib]
+name = "aeon_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aeon-node"
+path = "src/main.rs"
+
+[dependencies]
+aeon-core.workspace = true
+aeon-crypto.workspace = true
+aeon-storage.workspace = true
+aeon-network.workspace = true
+aeon-rpc.workspace = true
+tokio.workspace = true
+axum.workspace = true
+clap.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+async-trait = "0.1"
+anyhow.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+tempfile = "3"
