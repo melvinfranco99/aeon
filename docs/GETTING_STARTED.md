@@ -89,8 +89,10 @@ cargo run --release -p aeon-wallet -- create --wallet bob.json
 
 Each prints a 12-word recovery phrase (**write it down — it is the only
 way to recover the wallet**) and asks you to choose a password that
-encrypts the wallet file on disk. Note each wallet's printed address
-(`aeon1...`); you'll need both in a moment.
+encrypts the wallet file on disk. Each wallet actually prints **two**
+addresses from that one phrase: a transparent one (`aeon1...`) and a
+shielded one (`aeonz1...`, see step 7) — note both; you'll need the
+transparent ones in a moment.
 
 Check either wallet's address any time without a password:
 
@@ -144,12 +146,54 @@ cargo run --release -p aeon-wallet -- balance --wallet bob.json
 Bob's balance should now reflect the amount sent, and Alice's should be
 reduced by that amount (plus any block rewards mined after the send).
 
-## 7. Optional: run a second node and see the network in action
+## 7. Optional: send privately with the shielded pool
+
+Aeon also has an opt-in **shielded pool** hiding the amount and both
+addresses of a transaction — see [`docs/PRIVACY.md`](PRIVACY.md) for what
+exactly is hidden and its scope/risk notes. Building each shielded
+transaction below runs a real zk-SNARK proof, so — unlike the instant
+transparent `send` above — expect each of these to take **real time**
+(typically several seconds to tens of seconds).
+
+Move some of Alice's transparent balance into her own shielded balance:
+
+```
+cargo run --release -p aeon-wallet -- shield --wallet alice.json --amount 5.0
+```
+
+Check it landed (this rescans the chain locally with Alice's own viewing
+key — the node never sees it):
+
+```
+cargo run --release -p aeon-wallet -- shielded-balance --wallet alice.json
+```
+
+Send some of it *privately* to Bob's shielded address (from step 4's
+`aeonz1...` output) — mine a block afterwards to confirm it, the same as
+any other transaction:
+
+```
+cargo run --release -p aeon-wallet -- send-shielded --wallet alice.json --to <bob's aeonz1... address> --amount 2.0
+cargo run --release -p aeon-miner -- --address <alice's transparent address>
+cargo run --release -p aeon-wallet -- shielded-balance --wallet bob.json
+```
+
+Bob can move his shielded balance back to a transparent address (his own,
+by default) with `deshield`:
+
+```
+cargo run --release -p aeon-wallet -- deshield --wallet bob.json --amount 2.0
+cargo run --release -p aeon-miner -- --address <alice's transparent address>
+cargo run --release -p aeon-wallet -- balance --wallet bob.json
+```
+
+## 8. Optional: run a second node and see the network in action
 
 See `docs/MINING.md` for connecting two `aeon-node` instances (either on
 the same machine on different ports, or over a LAN/the internet) so mined
 blocks and transactions propagate between them — the same P2P flow
-exercised automatically by `crates/node/tests/two_node_integration.rs`.
+exercised automatically by `crates/node/tests/two_node_integration.rs`
+(transparent) and `crates/node/tests/shielded_integration.rs` (shielded).
 
 A ready-made two-node local script is provided at
 `scripts/run-local-testnet.ps1` (PowerShell).

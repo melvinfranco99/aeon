@@ -91,7 +91,38 @@ exactly zero — but with different constants, chosen so that at Aeon's
 instead of Bitcoin's ~131 years from a 2009 genesis. `crates/core/src/emission.rs`'s
 tests simulate the entire schedule and assert both properties hold.
 
-## 5. Scope: what's simplified relative to Kaspa
+## 5. The optional shielded pool
+
+Aeon also has a second, opt-in transaction pool where the amount and both
+addresses are hidden, built on Zcash's real Orchard protocol. It's
+substantial enough to have its own document — see
+**[`docs/PRIVACY.md`](PRIVACY.md)** — but the piece that's genuinely a
+consensus rule belongs here: **the transparent/shielded balance
+equation**.
+
+A `Transaction` (see `crates/core/src/types.rs`) may carry an optional
+shielded bundle alongside its ordinary transparent inputs/outputs. That
+bundle exposes a single public `value_balance: i64` — positive when value
+is *leaving* the shielded pool (funding transparent outputs), negative
+when value is *entering* it (drawn from transparent inputs). Consensus
+requires, for every transaction:
+
+```
+transparent_inputs_total − transparent_outputs_total + shielded_value_balance == fee   (fee ≥ 0)
+```
+
+This is the only thing that connects the two pools' accounting; it, plus
+the shielded bundle's own internal zk-SNARK constraints (which guarantee
+the *hidden* per-note amounts on the shielded side sum correctly without
+revealing them), is what makes it impossible to create value out of
+nothing by moving it between pools. See
+`aeon_core::validation::verify_transaction` and
+`verify_shielded_component` for the implementation, and
+`crates/node/tests/shielded_integration.rs` for an end-to-end test that
+exercises shielding, a private shielded-to-shielded send, and deshielding
+across two networked nodes.
+
+## 6. Scope: what's simplified relative to Kaspa
 
 Being upfront about this matters more than pretending otherwise:
 

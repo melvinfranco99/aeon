@@ -25,7 +25,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 All four must pass before a PR is merged; CI runs them on every push (see
-`.github/workflows/ci.yml`).
+`.github/workflows/ci.yml`). `cargo test --workspace` takes a few minutes
+rather than seconds, since the shielded-pool tests build real Halo2
+zk-SNARK proofs (see [`docs/PRIVACY.md`](docs/PRIVACY.md)) — that's
+expected, not a hang.
 
 ## Code style
 

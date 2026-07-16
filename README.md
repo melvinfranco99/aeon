@@ -16,6 +16,13 @@ appropriately scoped-down) P2P network and JSON-RPC API. See
 and — just as importantly — where it deliberately simplifies relative to
 Kaspa's production codebase, and why.
 
+Aeon also has an **optional, Zcash-grade shielded pool**: real Halo2
+zk-SNARKs (Zcash's own audited Orchard protocol, no trusted setup) hiding
+the amount and both addresses of any transaction you choose to shield —
+opt-in, transaction by transaction, alongside the transparent pool above.
+See [`docs/PRIVACY.md`](docs/PRIVACY.md) for exactly what's hidden, how,
+and its own honest risk assessment.
+
 > **Status:** a from-scratch, functional educational/hobby implementation,
 > not an audited, battle-tested cryptocurrency. Read
 > [`docs/CONSENSUS.md`](docs/CONSENSUS.md) before relying on it for
@@ -41,6 +48,7 @@ codebase.
 | Emission | Halving schedule, ≈114 years to full emission (~year 2140) |
 | Signatures | Schnorr / BIP340 over secp256k1 (via pure-Rust `k256`) |
 | Addresses | bech32m, `aeon1...` (same encoding family as Kaspa's `kaspa:...`) |
+| Shielded pool | Optional, opt-in — Zcash's audited Orchard protocol (Halo2 zk-SNARKs, no trusted setup); addresses `aeonz1...` |
 | Storage | `sled` (pure Rust, no C/C++ toolchain required) |
 
 ## Quickstart
@@ -70,6 +78,7 @@ two real wallets, mining, and sending AEON between them):
 
 - [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — install, build, create wallets, mine, send AEON
 - [`docs/CONSENSUS.md`](docs/CONSENSUS.md) — GHOSTDAG, emission schedule, difficulty adjustment, and honest scope limitations
+- [`docs/PRIVACY.md`](docs/PRIVACY.md) — the optional shielded pool: what's hidden, how, and its risk assessment
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — crate layout and data flow
 - [`docs/MINING.md`](docs/MINING.md) — running the miner, connecting multiple nodes
 - [`docs/WALLET.md`](docs/WALLET.md) — wallet command reference and file format
@@ -80,6 +89,7 @@ two real wallets, mining, and sending AEON between them):
 crates/
   crypto/    hashing, keys/signatures, addresses, mnemonics, keystores
   core/      GHOSTDAG engine, ledger, emission schedule, validation
+  shielded/  the optional shielded pool, built on Zcash's Orchard protocol
   storage/   sled-backed persistence, reorg handling
   network/   P2P gossip (TCP + bincode)
   rpc/       JSON-RPC types, axum server, HTTP client
@@ -99,10 +109,15 @@ cargo test --workspace
 This includes unit tests for GHOSTDAG coloring against hand-built DAGs,
 the emission schedule's convergence to 21M AEON and ~2140 exhaustion,
 difficulty adjustment, transaction/block validation (including
-double-spend rejection), and an end-to-end integration test
+double-spend rejection), and two end-to-end integration tests: one
 (`crates/node/tests/two_node_integration.rs`) that runs two full nodes,
 mines blocks, sends a real signed transaction between two wallets, and
-verifies both nodes converge on the same ledger state.
+verifies both nodes converge on the same ledger state; and one
+(`crates/node/tests/shielded_integration.rs`) that does the same for the
+shielded pool — shielding funds, sending them privately, and deshielding
+them — with real zk-SNARK proofs throughout. The shielded tests build
+real Halo2 proofs, so `cargo test --workspace` takes a few minutes, not
+seconds.
 
 ## Contributing
 

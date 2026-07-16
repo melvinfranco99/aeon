@@ -11,11 +11,18 @@ aeon/
                the UTXO ledger, the emission schedule, difficulty
                adjustment, and transaction/block validation rules.
                Storage-agnostic: it only depends on small traits
-               (`GhostdagStore`, `UtxoView`) that `aeon-storage` implements.
+               (`GhostdagStore`, `UtxoView`, `ShieldedPoolView`) that
+               `aeon-storage` implements.
+    shielded/  Aeon's optional shielded pool (see `docs/PRIVACY.md`):
+               wraps Zcash's audited `orchard` crate end to end — key
+               derivation, building/proving/verifying bundles, manual
+               wire (de)serialization (orchard has none built in), and
+               the note-commitment tree/Merkle-witness logic.
     storage/   Persistent storage on `sled` (pure Rust, no C/C++ toolchain
                needed — see "Why sled" below): blocks, GHOSTDAG metadata,
-               the UTXO set, and DAG-tip tracking, including reorg
-               (undo/redo) handling.
+               the UTXO set, DAG-tip tracking, and the shielded pool's
+               nullifier set/note-commitment frontier, including reorg
+               (undo/redo) handling for all of the above.
     network/   Peer-to-peer gossip: TCP + length-prefixed bincode framing,
                a handshake, and inv/getdata-style block/tx announcement.
     rpc/       Shared JSON-RPC types, an axum HTTP server, and an HTTP
@@ -51,6 +58,11 @@ aeon/
                 aeon-core
         (GHOSTDAG engine, validation,
          emission schedule, block/tx types)
+                    │
+                    ▼
+              aeon-shielded
+     (Orchard bundles: build/prove/verify,
+      note commitment tree, wire format)
 ```
 
 `aeon-node`'s "actor" pattern: a single async task owns the `Store` and
@@ -80,3 +92,18 @@ secp256k1 — the same curve and signature scheme Bitcoin and Kaspa use —
 just via a pure-Rust implementation (RustCrypto's `k256`) instead of
 bindings to the C `libsecp256k1` library. See `docs/CONSENSUS.md` for why
 BLAKE3 replaces kHeavyHash specifically.
+
+## Why reuse Zcash's `orchard` crate for the shielded pool?
+
+Every other cryptographic primitive in this list is a case of "use a
+mature, audited implementation instead of writing our own." The shielded
+pool is the same principle applied to the highest-stakes component in the
+whole codebase: a hand-rolled zk-SNARK circuit is exactly the kind of code
+where a subtle mistake can mean silently forgeable money or silently
+broken privacy, with no visible symptom until it's exploited. `orchard` is
+Zcash's own real, audited, in-production shielded-pool implementation;
+`aeon-shielded` wraps it rather than reimplementing zero-knowledge
+cryptography from scratch. See [`docs/PRIVACY.md`](PRIVACY.md) for the
+full design and an honest assessment of what *isn't* covered by reusing
+an audited primitive (the integration code around it is still new and
+unaudited).
