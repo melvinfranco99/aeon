@@ -153,6 +153,7 @@ async fn mining_and_a_transaction_propagate_between_two_nodes() {
             },
         ],
         lock_time: 0,
+        shielded: None,
     };
     let signature = sign_input(&tx, &alice);
     for input in &mut tx.inputs {

@@ -38,15 +38,48 @@ impl Mempool {
         self.txs.is_empty()
     }
 
-    /// Removes every mempool transaction that conflicts with (spends the
-    /// same input as) any transaction in `confirmed`, e.g. because a new
-    /// block just confirmed one version of that spend.
+    /// Removes every mempool transaction that was itself just confirmed, or
+    /// that conflicts with a transaction in `confirmed` — spending the same
+    /// transparent output, or (for a shielded bundle) reusing a nullifier
+    /// `confirmed` already spent. Without this, a purely shielded
+    /// transaction (no transparent inputs at all) would never be pruned by
+    /// the transparent-only conflict check and would stay in the mempool
+    /// forever, causing every later block template to fail re-validating it
+    /// (its nullifier is already spent) and silently drop the *entire*
+    /// mempool batch — see `docs/PRIVACY.md`.
     pub fn remove_conflicting(&mut self, confirmed: &[Transaction]) {
-        let spent: HashSet<_> = confirmed
+        let confirmed_txids: HashSet<Hash> = confirmed.iter().map(|tx| tx.txid()).collect();
+        let spent_outpoints: HashSet<_> = confirmed
             .iter()
             .flat_map(|tx| tx.inputs.iter().map(|i| i.prev_out))
             .collect();
-        self.txs
-            .retain(|_, tx| !tx.inputs.iter().any(|i| spent.contains(&i.prev_out)));
+        let spent_nullifiers: HashSet<[u8; 32]> = confirmed
+            .iter()
+            .filter_map(|tx| tx.shielded.as_ref())
+            .flat_map(|bundle| bundle.nullifier_bytes())
+            .collect();
+
+        self.txs.retain(|txid, tx| {
+            if confirmed_txids.contains(txid) {
+                return false;
+            }
+            if tx
+                .inputs
+                .iter()
+                .any(|i| spent_outpoints.contains(&i.prev_out))
+            {
+                return false;
+            }
+            if let Some(bundle) = &tx.shielded {
+                if bundle
+                    .nullifier_bytes()
+                    .iter()
+                    .any(|nf| spent_nullifiers.contains(nf))
+                {
+                    return false;
+                }
+            }
+            true
+        });
     }
 }

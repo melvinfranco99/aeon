@@ -2,18 +2,20 @@
 //! exclusively and processes one command at a time (RPC requests, network
 //! events), so block/UTXO bookkeeping never races against itself.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aeon_core::{
     bits_to_target, block_reward, genesis_bits, hash_meets_target, verify_block_transactions,
-    verify_transaction, Block, BlockHeader, GhostdagParams, Transaction, TxOutput,
+    verify_transaction_full, Block, BlockHeader, GhostdagParams, Transaction, TxOutput,
 };
 use aeon_crypto::Hash;
 use aeon_network::{NetMessage, Network};
-use aeon_rpc::{BlockTemplate, SubmitResult, TipInfo, UtxoInfo};
+use aeon_rpc::{
+    BlockTemplate, ShieldedAnchorInfo, ShieldedBundleInfo, SubmitResult, TipInfo, UtxoInfo,
+};
 use aeon_storage::Store;
 use tokio::sync::{mpsc, oneshot};
 
@@ -21,11 +23,11 @@ use crate::mempool::Mempool;
 
 pub enum NodeCommand {
     SubmitBlock {
-        block: Block,
+        block: Box<Block>,
         respond_to: oneshot::Sender<SubmitResult>,
     },
     SubmitTransaction {
-        tx: Transaction,
+        tx: Box<Transaction>,
         respond_to: oneshot::Sender<SubmitResult>,
     },
     GetTipInfo {
@@ -42,6 +44,13 @@ pub enum NodeCommand {
     GetUtxos {
         pubkey_hash: [u8; 20],
         respond_to: oneshot::Sender<Vec<UtxoInfo>>,
+    },
+    GetShieldedAnchor {
+        respond_to: oneshot::Sender<ShieldedAnchorInfo>,
+    },
+    GetShieldedActionsSince {
+        since_height: u64,
+        respond_to: oneshot::Sender<Vec<ShieldedBundleInfo>>,
     },
     PeerConnected {
         addr: SocketAddr,
@@ -70,7 +79,7 @@ impl NodeActor {
             match cmd {
                 NodeCommand::SubmitBlock { block, respond_to } => {
                     let hash = block.hash();
-                    self.try_accept_block(block, None).await;
+                    self.try_accept_block(*block, None).await;
                     let result = if self.store.has_block(&hash) {
                         SubmitResult::ok()
                     } else {
@@ -81,7 +90,7 @@ impl NodeActor {
                     let _ = respond_to.send(result);
                 }
                 NodeCommand::SubmitTransaction { tx, respond_to } => {
-                    let result = self.try_accept_transaction(tx, true).await;
+                    let result = self.try_accept_transaction(*tx, true).await;
                     let _ = respond_to.send(result);
                 }
                 NodeCommand::GetTipInfo { respond_to } => {
@@ -117,6 +126,28 @@ impl NodeActor {
                         })
                         .collect();
                     let _ = respond_to.send(utxos);
+                }
+                NodeCommand::GetShieldedAnchor { respond_to } => {
+                    let _ = respond_to.send(ShieldedAnchorInfo {
+                        anchor: self.store.shielded_anchor(),
+                    });
+                }
+                NodeCommand::GetShieldedActionsSince {
+                    since_height,
+                    respond_to,
+                } => {
+                    let bundles = self
+                        .store
+                        .selected_chain_blocks_since(since_height)
+                        .into_iter()
+                        .flat_map(|(height, block)| {
+                            block.transactions.into_iter().filter_map(move |tx| {
+                                tx.shielded
+                                    .map(|bundle| ShieldedBundleInfo { height, bundle })
+                            })
+                        })
+                        .collect();
+                    let _ = respond_to.send(bundles);
                 }
                 NodeCommand::PeerConnected {
                     addr,
@@ -210,7 +241,13 @@ impl NodeActor {
         if self.mempool.contains(&txid) {
             return SubmitResult::ok();
         }
-        match verify_transaction(&tx, &self.store) {
+        let mut no_conflicts_within_this_call = HashSet::new();
+        match verify_transaction_full(
+            &tx,
+            &self.store,
+            &self.store,
+            &mut no_conflicts_within_this_call,
+        ) {
             Ok(_fee) => {
                 self.mempool.insert(tx);
                 if broadcast {
@@ -270,9 +307,12 @@ impl NodeActor {
                 }
             };
 
-            if let Err(e) =
-                verify_block_transactions(&block.transactions, preview.blue_score, &self.store)
-            {
+            if let Err(e) = verify_block_transactions(
+                &block.transactions,
+                preview.blue_score,
+                &self.store,
+                &self.store,
+            ) {
                 tracing::warn!(%hash, "rejecting block: invalid transactions: {e}");
                 continue;
             }
@@ -325,12 +365,18 @@ impl NodeActor {
             // See the doc comment on `Transaction`: lock_time = chain
             // height keeps coinbase txids unique across blocks.
             lock_time: chain_height,
+            shielded: None,
         };
 
         let mut transactions = vec![coinbase];
         transactions.extend(self.mempool.values().cloned());
 
-        let total_fees = match verify_block_transactions(&transactions, chain_height, &self.store) {
+        let total_fees = match verify_block_transactions(
+            &transactions,
+            chain_height,
+            &self.store,
+            &self.store,
+        ) {
             Ok(fees) => fees,
             Err(_) => {
                 // Something in the mempool no longer validates together

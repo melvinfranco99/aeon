@@ -1,8 +1,8 @@
 use aeon_core::{Block, Transaction};
 
 use crate::types::{
-    BalanceInfo, BlockTemplate, SubmitBlockRequest, SubmitResult, SubmitTxRequest, TipInfo,
-    UtxoInfo,
+    BalanceInfo, BlockTemplate, ShieldedAnchorInfo, ShieldedBundleInfo, SubmitBlockRequest,
+    SubmitResult, SubmitTxRequest, TipInfo, UtxoInfo,
 };
 
 /// Thin async HTTP client for Aeon's node RPC, used by `aeon-wallet` and
@@ -74,6 +74,28 @@ impl RpcClient {
         self.http
             .get(format!("{}/utxos", self.base_url))
             .query(&[("address", address)])
+            .send()
+            .await?
+            .json()
+            .await
+    }
+
+    pub async fn shielded_anchor(&self) -> reqwest::Result<ShieldedAnchorInfo> {
+        self.http
+            .get(format!("{}/shielded-anchor", self.base_url))
+            .send()
+            .await?
+            .json()
+            .await
+    }
+
+    pub async fn shielded_actions_since(
+        &self,
+        since_height: u64,
+    ) -> reqwest::Result<Vec<ShieldedBundleInfo>> {
+        self.http
+            .get(format!("{}/shielded-actions", self.base_url))
+            .query(&[("since_height", since_height.to_string())])
             .send()
             .await?
             .json()

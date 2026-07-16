@@ -9,6 +9,7 @@ description = "JSON-RPC types, axum server and HTTP client shared by aeon-node, 
 [dependencies]
 aeon-core.workspace = true
 aeon-crypto.workspace = true
+aeon-shielded.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 axum.workspace = true

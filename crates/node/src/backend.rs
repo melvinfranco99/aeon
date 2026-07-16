@@ -1,6 +1,9 @@
 use aeon_core::{Block, Transaction};
 use aeon_crypto::{Address, Hash};
-use aeon_rpc::{BalanceInfo, BlockTemplate, RpcBackend, SubmitResult, TipInfo, UtxoInfo};
+use aeon_rpc::{
+    BalanceInfo, BlockTemplate, RpcBackend, ShieldedAnchorInfo, ShieldedBundleInfo, SubmitResult,
+    TipInfo, UtxoInfo,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::actor::NodeCommand;
@@ -63,7 +66,10 @@ impl RpcBackend for NodeHandle {
         let (respond_to, rx) = oneshot::channel();
         if self
             .cmd_tx
-            .send(NodeCommand::SubmitBlock { block, respond_to })
+            .send(NodeCommand::SubmitBlock {
+                block: Box::new(block),
+                respond_to,
+            })
             .await
             .is_err()
         {
@@ -94,7 +100,10 @@ impl RpcBackend for NodeHandle {
         let (respond_to, rx) = oneshot::channel();
         if self
             .cmd_tx
-            .send(NodeCommand::SubmitTransaction { tx, respond_to })
+            .send(NodeCommand::SubmitTransaction {
+                tx: Box::new(tx),
+                respond_to,
+            })
             .await
             .is_err()
         {
@@ -115,5 +124,34 @@ impl RpcBackend for NodeHandle {
             .await
             .map_err(|_| ACTOR_STOPPED.to_string())?;
         rx.await.map_err(|_| ACTOR_STOPPED.to_string())
+    }
+
+    async fn shielded_anchor(&self) -> ShieldedAnchorInfo {
+        let (respond_to, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(NodeCommand::GetShieldedAnchor { respond_to })
+            .await
+            .is_err()
+        {
+            return ShieldedAnchorInfo { anchor: [0u8; 32] };
+        }
+        rx.await.unwrap_or(ShieldedAnchorInfo { anchor: [0u8; 32] })
+    }
+
+    async fn shielded_actions_since(&self, since_height: u64) -> Vec<ShieldedBundleInfo> {
+        let (respond_to, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(NodeCommand::GetShieldedActionsSince {
+                since_height,
+                respond_to,
+            })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
     }
 }

@@ -1,5 +1,6 @@
 use aeon_core::{Block, Transaction};
 use aeon_crypto::Hash;
+use aeon_shielded::ShieldedBundle;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -69,4 +70,24 @@ pub struct UtxoInfo {
 #[derive(Deserialize, Debug, Clone)]
 pub struct AddressQuery {
     pub address: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ShieldedAnchorInfo {
+    pub anchor: [u8; 32],
+}
+
+/// A confirmed shielded bundle plus the chain height (blue score) it was
+/// confirmed at, as returned by `/shielded-actions` for wallet-side
+/// scanning (see `docs/PRIVACY.md`).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ShieldedBundleInfo {
+    pub height: u64,
+    pub bundle: ShieldedBundle,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SinceHeightQuery {
+    #[serde(default)]
+    pub since_height: u64,
 }

@@ -33,3 +33,4 @@ rand.workspace = true
 [dev-dependencies]
 reqwest.workspace = true
 tempfile = "3"
+aeon-shielded.workspace = true
